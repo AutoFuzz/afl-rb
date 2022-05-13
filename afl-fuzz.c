@@ -87,6 +87,12 @@
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
 
+// Modified for SIGUSR2 by ZYP
+char** saved_argv;
+u8     need_sync_fuzzer;
+
+// Modified for binding specific core by LSY
+static int bind_to_core=-1;           /* Bind to a core (-1 = default)    */
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
@@ -426,6 +432,9 @@ static void dump_to_logs() {
   close(branch_hit_fd);
 }
 
+// Modified for SIGUSR2 by ZYP
+static void sync_fuzzers(char** argv);
+
 /* Get unix time in milliseconds */
 
 static u64 get_cur_time(void) {
@@ -503,6 +512,16 @@ static void bind_to_free_cpu(void) {
   DIR* d;
   struct dirent* de;
   cpu_set_t c;
+
+  // Modified for binding specific core by LSY
+  if (bind_to_core != -1){
+    CPU_ZERO(&c);
+    CPU_SET(bind_to_core, &c);
+    OKF("Binding to core #%d.", bind_to_core);
+    cpu_aff = bind_to_core;
+    if (sched_setaffinity(0, sizeof(c), &c)) PFATAL("sched_setaffinity failed");
+    return;
+  }
 
   u8 cpu_used[4096] = { 0 };
   u32 i;
@@ -7428,6 +7447,12 @@ havoc_stage:
 
     }
 
+    // Modified for SIGUSR2 by ZYP
+    if(need_sync_fuzzer==1 && !stop_soon && sync_id){
+          sync_fuzzers(saved_argv);
+      printf("extra sync_fuzzers finished \r\n");
+    }
+
   }
 
   new_hit_cnt = queued_paths + unique_crashes;
@@ -7730,6 +7755,8 @@ static void sync_fuzzers(char** argv) {
 
   closedir(sd);
 
+  need_sync_fuzzer = 0; // Modified for SIGUSR2 by ZYP
+
 }
 
 
@@ -7751,6 +7778,13 @@ static void handle_skipreq(int sig) {
 
   skip_requested = 1;
 
+}
+
+// Modified for SIGUSR2 by ZYP
+static void handle_sigusr2(int sig)
+{
+	printf("handle_sigusr2 called \r\n");
+	need_sync_fuzzer = 1;
 }
 
 /* Handle timeout (SIGALRM). */
@@ -8572,6 +8606,10 @@ EXP_ST void setup_signal_handlers(void) {
   sa.sa_handler = handle_skipreq;
   sigaction(SIGUSR1, &sa, NULL);
 
+  // Modified for SIGUSR2 by ZYP
+  sa.sa_handler = handle_sigusr2;
+  sigaction(SIGUSR2, &sa, NULL);
+
   /* Things we don't care about. */
 
   sa.sa_handler = SIG_IGN;
@@ -8709,7 +8747,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+bq:rsi:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
+  while ((opt = getopt(argc, argv, "+bq:rsi:o:f:m:t:T:dnCB:S:M:x:Qc:")) > 0)
 
     switch (opt) {
 
@@ -8893,6 +8931,13 @@ int main(int argc, char** argv) {
 
         break;
 
+        // Modified for binding specific core by LSY
+      case 'c': /* Bind specific core */
+
+        if (bind_to_core != -1) FATAL("Multiple -b options not supported");
+        bind_to_core = atoi(optarg);
+        break;
+
       default:
 
         usage(argv[0]);
@@ -8986,6 +9031,9 @@ int main(int argc, char** argv) {
   else
     use_argv = argv + optind;
 
+  // Modified for SIGUSR2 by ZYP
+  saved_argv = use_argv;
+
   perform_dry_run(use_argv);
 
   cull_queue();
@@ -9058,9 +9106,9 @@ int main(int argc, char** argv) {
 
     skipped_fuzz = fuzz_one(use_argv);
 
-    if (!stop_soon && sync_id && !skipped_fuzz) {
+    if (!stop_soon && sync_id && (!skipped_fuzz || need_sync_fuzzer == 1) ) { // Modified for SIGUSR2 by ZYP
       
-      if (!(sync_interval_cnt++ % SYNC_INTERVAL))
+      if (!(sync_interval_cnt++ % SYNC_INTERVAL) || need_sync_fuzzer == 1)    // Modified for SIGUSR2 by ZYP
         sync_fuzzers(use_argv);
 
     }
